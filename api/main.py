@@ -32,9 +32,10 @@ DUMMY_PASSWORD=password_hash(secrets.token_hex(32))
 async def lifespan(app):
     if os.getenv("SCHEMA_READY")!="1":
         initialize()
-    for code,name,role,key in [("27127","عضو اخوت","member","MEMBER_PASSWORD"),("90001","مربی اخوت","coach","COACH_PASSWORD")]:
-        if password:=os.getenv(key):
-            create(code,name,role,password, "سلمان" if role=="member" else "", "آموزش" if role=="member" else "")
+    # حساب‌های اولیه دیگر از متغیر محیطی ساخته نمی‌شوند.
+    # برای ساخت حساب از دستور زیر استفاده کنید:
+    #   python -m api.accounts --code 27127 --name "عضو اخوت" --role member --ring "سلمان" --team "آموزش"
+    # یا بعد از دادن نقش ادمین، از پنل «ثبت عضو جدید» استفاده کنید.
     yield
 
 app=FastAPI(title="Okhovat API",lifespan=lifespan)
@@ -386,94 +387,18 @@ class Question(Input):
     plan:Plan
 
 @app.post("/api/assistant/chat/")
-def assistant(b:Question,u=Depends(user)):
-    from .assistant import interpret, periods
-    with admitted(CHAT_SLOTS):
-        plan=interpret(b.message,b.plan.model_dump())
-    result={"plan":plan}
-    if plan["kind"]!="stats":return result
-    if plan["scope"]!="self" and not u["ring"]:return {**result,"no_ring":True}
-    where,args="a.code=?",[u["code"]]
-    if plan["scope"]!="self":
-        where,args="a.ring=?",[u["ring"]]
-        if plan["scope"]=="peers":where+=" AND a.code<>?";args.append(u["code"])
-    with database() as q:
-        result["members"]=q("SELECT count(*) AS n FROM ok_accounts a WHERE "+where,args).fetchone()["n"]
-        result["results"]=[]
-        for start,end in periods(plan["period"],datetime.now(ZoneInfo("Asia/Tehran")).date()):
-            row=q("SELECT COUNT(*) AS reports,COUNT(DISTINCT actor) AS participants,COALESCE(SUM(sport),0) AS sport,COALESCE(SUM(reading),0) AS reading FROM ok_growth g JOIN ok_accounts a ON a.code=g.actor WHERE "+where+" AND g.day BETWEEN ? AND ?",[*args,start.isoformat(),end.isoformat()]).fetchone()
-            result["results"].append(dict(row))
-    return result
+def assistant_chat(b:Question,u=Depends(user)):
+    from .assistant import answer
+    return answer(b, u)
 
-@app.post("/api/notices/read")
-def read_notices(u=Depends(user)):
-    with database() as q:q("UPDATE ok_notices SET seen=1 WHERE recipient=?",(u["code"],))
-    return {"ok":True}
+# Static files
+app.mount("/assets", StaticFiles(directory=str(DIST / "assets")), name="assets")
 
-@app.put("/api/follows/{target}")
-def follow(target:str,b:Vote,u=Depends(user)):
-    with database() as q:
-        if target==u["code"] or not q("SELECT 1 FROM ok_accounts WHERE code=?",(target,)).fetchone():raise HTTPException(422)
-        if b.active:q("INSERT INTO ok_follows VALUES(?,?) ON CONFLICT DO NOTHING",(u["code"],target))
-        else:q("DELETE FROM ok_follows WHERE actor=? AND target=?",(u["code"],target))
-    return {"ok":True}
-
-@app.get("/api/state")
-def state(u=Depends(user)):
-    with database() as q:
-        rev=q("SELECT rev FROM ok_revision WHERE id=1").fetchone()["rev"]
-    key=cache.state_key(u,rev)
-    cached=cache.get(key)
-    if cached is not None:return cached
-    with admitted(STATE_SLOTS):
-        result=build_state(u)
-        cache.put(key,result)
-        return result
-
-def build_state(u):
-    actor=u["code"]
-    out=dict(posts=[],growth=[],comments={},ringLikes={},bookmarks={},recommended={},nominations={},growthMessages=[],coachReadIds=[],ringGrades={},groupGrades={})
-    with snapshot() as q:
-        accounts={r["code"]:dict(r) for r in q("SELECT code,name,role,ring,team FROM ok_accounts")}
-        out["directory"]=[dict(id=a["code"],name=a["name"],group=a["team"],ring=a["ring"]) for a in accounts.values() if a["role"]=="member"] if u["role"]=="coach" else []
-        out["memberRings"]={actor:u["ring"]}
-        out["followerCounts"]={r["target"]:r["n"] for r in q("SELECT target,COUNT(*) AS n FROM ok_follows GROUP BY target")}
-        out["following"]={accounts[r["target"]]["name"]:True for r in q("SELECT target FROM ok_follows WHERE actor=?",(actor,))}
-        out["notifications"]=[dict(type=r["kind"],count=r["cnt"]) for r in q("SELECT kind,COUNT(*) AS cnt FROM ok_notices WHERE recipient=? AND seen=0 GROUP BY kind",(actor,))]
-        for row in q("SELECT * FROM ok_posts WHERE id NOT IN (SELECT post FROM ok_removed_posts) ORDER BY created DESC"):
-            a=accounts[row["actor"]]
-            out["posts"].append(dict(unpack(row["payload"]),id=row["id"],authorId=a["code"],name=a["name"],coachPost=a["role"]=="coach",ring=a["ring"],group=a["team"],createdAt=row["created"]))
-        sql="SELECT * FROM ok_growth"
-        rows=q(sql) if u["role"]=="coach" else q(sql+" WHERE actor=?",(actor,))
-        for r in rows:
-            a=accounts[r["actor"]]
-            out["growth"].append(dict(unpack(r["payload"]),userId=a["code"],userName=a["name"],ring=a["ring"],group=a["team"],dateGregorian=r["day"]))
-        for r in q("SELECT * FROM ok_votes WHERE post NOT IN (SELECT post FROM ok_removed_posts)"):
-            pid,who=r["post"],r["actor"]
-            if r["kind"]=="like":out["ringLikes"].setdefault(pid,{})[who]={"ring":accounts[who]["ring"]}
-            if r["kind"]=="recommend":
-                out["recommended"][pid]=True
-                out["nominations"].setdefault(pid,[]).append(who)
-            if r["kind"]=="bookmark" and who==actor:out["bookmarks"][pid]=True
-        likes={}
-        for r in q("SELECT l.* FROM ok_comment_likes l JOIN ok_comments c ON c.id=l.id WHERE c.post NOT IN (SELECT post FROM ok_removed_posts)"):likes.setdefault(r["id"],set()).add(r["actor"])
-        threads={}
-        for r in q("SELECT * FROM ok_comments WHERE post NOT IN (SELECT post FROM ok_removed_posts) ORDER BY created,id"):
-            voters=likes.get(r["id"],set())
-            c=dict(id=r["id"],name=accounts[r["actor"]]["name"],text=r["body"],liked=actor in voters,likes=len(voters-{actor}),replies=[])
-            threads[r["id"]]=c
-            if r["parent"]:threads[r["parent"]]["replies"].append(c)
-            else:out["comments"].setdefault(r["post"],[]).append(c)
-        for r in q("SELECT * FROM ok_grades"):out[r["kind"]+"Grades"][r["target"]]=r["score"]
-        for r in q("SELECT m.*,i.seen FROM ok_messages m LEFT JOIN ok_inbox i ON m.id=i.message AND i.actor=? WHERE m.sender=? OR i.actor=? ORDER BY created DESC",(actor,actor,actor)):
-            out["growthMessages"].append(dict(id=r["id"],sender=r["sender"],recipients=[actor] if r["seen"] is not None else [],label=r["label"],text=r["body"],date=r["created"]))
-            if r["seen"]:out["coachReadIds"].append(r["id"]+"-"+actor)
-        for r in q("SELECT name,value FROM ok_preferences WHERE actor=?",(actor,)):out[r["name"]]=unpack(r["value"])
-    return out
-
-@app.get("/api/health")
-def health():
-    with database() as q:q("SELECT 1").fetchone()
-    return {"ok":True}
-
-app.mount("/",StaticFiles(directory=DIST,html=True),name="frontend")
+@app.get("/{full_path:path}")
+def spa(full_path: str):
+    if full_path.startswith("api/") or full_path.startswith("docs"):
+        raise HTTPException(404)
+    target = DIST / full_path
+    if target.is_file():
+        return FileResponse(target)
+    return FileResponse(DIST / "index.html")
