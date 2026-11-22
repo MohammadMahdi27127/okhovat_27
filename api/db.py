@@ -25,7 +25,7 @@ def database():
     if url.startswith(("postgresql://","postgres://")):
         import psycopg
         from psycopg.rows import dict_row
-        conn = psycopg.connect(url, row_factory=dict_row, connect_timeout=3, options="-c statement_timeout=5000 -c lock_timeout=200")
+        conn = psycopg.connect(url, row_factory=dict_row, connect_timeout=15, options="-c statement_timeout=5000 -c lock_timeout=200")
         def execute(sql, params=()):
             return conn.execute(sql.replace("?", "%s"), params)
     else:
