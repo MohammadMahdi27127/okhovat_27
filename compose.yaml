@@ -1,0 +1,67 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: okhovat
+      POSTGRES_USER: okhovat
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Create .env using setup_env.py}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U okhovat -d okhovat"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+    restart: unless-stopped
+  cache:
+    image: redis:7.4-alpine
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Run setup_env.py}
+    command: ["/bin/sh", "-ec", 'exec redis-server --requirepass "$$REDIS_PASSWORD" --maxmemory 64mb --maxmemory-policy allkeys-lru --save "" --appendonly no']
+    networks: [cache_private]
+    mem_limit: 128m
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+    restart: unless-stopped
+  migrate:
+    build: .
+    command: ["python","-m","api.migrate"]
+    environment:
+      DATABASE_URL: postgresql://okhovat:${DB_PASSWORD}@db:5432/okhovat
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Run setup_env.py}
+    depends_on:
+      db:
+        condition: service_healthy
+  web:
+    networks: [default, cache_private]
+    init: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    build: .
+    ports:
+      - "127.0.0.1:8080:8000"
+    environment:
+      DATABASE_URL: postgresql://okhovat_web:${APP_DB_PASSWORD}@db:5432/okhovat
+      SCHEMA_READY: "1"
+      REDIS_URL: redis://:${REDIS_PASSWORD}@cache:6379/0
+      UPLOADS_DIR: /data/uploads
+      MEMBER_PASSWORD: ${MEMBER_PASSWORD:-}
+      COACH_PASSWORD: ${COACH_PASSWORD:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
+      ASSISTANT_OLLAMA_URL: ${ASSISTANT_OLLAMA_URL:-}
+      ASSISTANT_OLLAMA_MODEL: ${ASSISTANT_OLLAMA_MODEL:-}
+    volumes:
+      - uploads:/data/uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+    restart: unless-stopped
+volumes:
+  pgdata:
+  uploads:
+    name: okhovat_uploads
+
+networks:
+  cache_private:
+    internal: true
