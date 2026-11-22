@@ -15,6 +15,7 @@ if __name__=="__main__":
         print("Existing credentials kept; Redis password configured.")
     else:
         with os.fdopen(fd,"w") as f:
-            for key in ("DB_PASSWORD","MEMBER_PASSWORD","COACH_PASSWORD","REDIS_PASSWORD","APP_DB_PASSWORD"):
+            for key in ("DB_PASSWORD","REDIS_PASSWORD","APP_DB_PASSWORD"):
                 f.write(f"{key}={secrets.token_hex(16)}\n")
-        print("Created .env. Use MEMBER_PASSWORD for 27127 and COACH_PASSWORD for 90001.")
+        print("Created .env (without MEMBER/COACH passwords).")
+        print("Create accounts with: python -m api.accounts --code ... --name ... --role ...")
