@@ -28,6 +28,21 @@ WEEK=7*86400
 COOKIE="okhovat_session"
 DUMMY_PASSWORD=password_hash(secrets.token_hex(32))
 
+def uploads_root():
+    return Path(os.getenv("UPLOADS_DIR", "var/uploads"))
+
+def purpose_dir(purpose: str) -> Path:
+    """Separate storage by purpose for independent volumes."""
+    mapping = {
+        "avatar": "avatars",
+        "post": "posts",
+        "proof": "proofs",
+    }
+    sub = mapping.get(purpose, "other")
+    folder = uploads_root() / sub
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
 @asynccontextmanager
 async def lifespan(app):
     if os.getenv("SCHEMA_READY")!="1":
@@ -296,7 +311,7 @@ def upload(purpose:Literal["proof","post","avatar"],file:UploadFile,u=Depends(us
     if data[:4]==b"RIFF" and data[8:12]==b"WEBP":mime="image/webp"
     if data[4:8]==b"ftyp":mime="video/mp4"
     if purpose=="avatar" and not mime.startswith("image/"):raise HTTPException(422,"تصویر معتبر انتخاب کن.")
-    folder=Path(os.getenv("UPLOADS_DIR","var/uploads"));folder.mkdir(parents=True,exist_ok=True)
+    folder = purpose_dir(purpose)
     if shutil.disk_usage(folder).free < len(data)+32*1024*1024:
         raise HTTPException(507,"فضای ذخیره‌سازی کافی نیست.")
     fid=uid()
@@ -327,7 +342,10 @@ def download(fid:str,u=Depends(user)):
         if r and r["purpose"]=="post" and q("SELECT 1 FROM ok_removed_posts WHERE media=?",("/api/files/"+fid,)).fetchone():raise HTTPException(404)
     if not r or (r["purpose"]=="proof" and r["owner"]!=u["code"] and u["role"]!="coach"):raise HTTPException(404)
     kwargs={"filename":r["name"]} if r["mime"]=="application/octet-stream" else {}
-    return FileResponse(Path(os.getenv("UPLOADS_DIR","var/uploads"))/r["id"],media_type=r["mime"],headers={"Content-Security-Policy":"sandbox"},**kwargs)
+    path = purpose_dir(r["purpose"]) / r["id"]
+    if not path.is_file():
+        raise HTTPException(404)
+    return FileResponse(path, media_type=r["mime"], headers={"Content-Security-Policy":"sandbox"}, **kwargs)
 
 @app.put("/api/comments/{cid}/like")
 def like_comment(cid:str,b:Vote,u=Depends(user)):
